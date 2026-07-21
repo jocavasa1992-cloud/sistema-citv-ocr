@@ -4,37 +4,46 @@ import openpyxl
 from flask import Flask, request, render_template_string, send_file
 import pytesseract
 from PIL import Image
+from pdf2image import convert_from_path
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+# Patrones mejorados y flexibles según los documentos reales de CITV
 DOCUMENT_PATTERNS = {
-    'CERTIFICADO': [r'CERTIFICADO DE INSPECCI[OÓ]N T[EÉ]CNICA VEHICULAR', r'RESULTADO DE LA INSPECCI[OÓ]N.*APROBADO'],
+    'CERTIFICADO': [r'CERTIFICADO DE INSPECCI[OÓ]N T[EÉ]CNICA VEHICULAR', r'RESULTADO DE LA INSPECCI[OÓ]N'],
     'INFORME': [r'INFORME DE INSPECCI[OÓ]N T[EÉ]CNICA VEHICULAR', r'DATOS DE LOS EQUIPOS'],
-    'TARJETA_FISICA': [r'TARJETA DE IDENTIFICACI[OÓ]N VEHICULAR', r'SUNARP'],
+    'TARJETA_FISICA': [r'TARJETA DE IDENTIFICACI[OÓ]N VEHICULAR', r'SUNARP', r'Zona Registral'],
     'TARJETA_VIRTUAL': [r'TARJETA DE IDENTIFICACI[OÓ]N VEHICULAR ELECTR[OÓ]NICA', r'TIVE', r'C[OÓ]DIGO DE VERIFICACI[OÓ]N'],
-    'SOAT': [r'SOAT', r'AFOCAT', r'AUTOSEGURO', r'CERTIFICADO CONTRA ACCIDENTES'],
-    'LICENCIA': [r'LICENCIA DE CONDUCIR', r'MINISTERIO DE TRANSPORTES Y COMUNICACIONES', r'MTC'],
+    'SOAT': [r'SOAT', r'AFOCAT', r'MAPFRE', r'APESEG', r'Consulta SOAT', r'CERTIFICADO CONTRA ACCIDENTES'],
+    'LICENCIA': [r'LICENCIA DE CONDUCIR', r'DIRECCION GENERAL DE AUTORIZACIONES', r'MTC', r'AUTORIZACIONES EN TRANSPORTE'],
     'DNI': [r'DOCUMENTO NACIONAL DE IDENTIDAD', r'RENIEC', r'CARNET DE EXTRANJERIA', r'PASAPORTE'],
     'LUNAS': [r'LUNAS OSCURECIDAS', r'AUTORIZACI[OÓ]N DE USO DE LUNAS', r'POLIC[IÍ]A NACIONAL'],
     'CERT_GLP': [r'COMBUSTION DE GLP', r'CERTIFICADO DE CONFORMIDAD DEL VEHICULO CON COMBUSTION DE GLP'],
     'CERT_GNV': [r'VEH[IÍ]CULO A GNV', r'GAS NATURAL VEHICULAR', r'CERTIFICADO DE INSPECCI[OÓ]N ANUAL DEL VEH[IÍ]CULO A GNV'],
-    'VOUCHER': [r'BOLETA DE VENTA ELECTR[OÓ]NICA', r'TICKET DE RECAUDACION', r'PROX\. REV\. ANUAL'],
+    'VOUCHER': [r'BOLETA DE VENTA', r'TICKET N°', r'TICKET DE RECAUDACION', r'PROX\. REV\. ANUAL'],
     'INFOGAS': [r'INFOGAS', r'infogas\.com\.pe', r'Habilitado para consumir'],
     'TUC': [r'TARJETA [UÚ]NICA DE CIRCULACI[OÓ]N', r'TUC', r'AUTORIDAD DE TRANSPORTE URBANO', r'ATU'],
-    'RTV_ANTERIOR': [r'FECHA PR[OÓ]XIMA INSPECCI[OÓ]N'],
-    'CONSULTA_CITV': [r'Consulta de los Certificados de Inspecci[oó]n T[eé]cnica Vehicular'],
+    'RTV_ANTERIOR': [r'FECHA PR[OÓ]XIMA INSPECCI[OÓ]N', r'PEN[UÚ]LTIMO DOCUMENTO REGISTRADO'],
+    'CONSULTA_CITV': [r'Consulta de los Certificados de Inspecci[oó]n T[eé]cnica Vehicular', r'ÚLTIMO DOCUMENTO REGISTRADO'],
     'GLP_INICIAL_RENO': [r'CERTIFICADO DE INSPECCI[OÓ]N DE VEH[IÍ]CULO A GLP']
 }
 
-def extract_text(image_path):
+def process_file_ocr(file_path):
+    """ Extrae texto de imágenes o convierte PDFs a imágenes para procesarlos """
+    extracted_text = ""
     try:
-        img = Image.open(image_path)
-        return pytesseract.image_to_string(img, lang='spa')
+        if file_path.lower().endswith('.pdf'):
+            images = convert_from_path(file_path)
+            for img in images:
+                extracted_text += pytesseract.image_to_string(img, lang='spa') + "\n"
+        else:
+            img = Image.open(file_path)
+            extracted_text = pytesseract.image_to_string(img, lang='spa')
     except Exception as e:
-        print(f"Error OCR en {image_path}: {e}")
-        return ""
+        print(f"Error procesando {file_path}: {e}")
+    return extracted_text
 
 def extract_placa(text):
     match = re.search(r'\b[A-Z0-9]{3}[- ]?[A-Z0-9]{3}\b', text.upper())
@@ -60,7 +69,7 @@ def process_expediente_excel(excel_path, docs_folder):
                 continue
 
             fpath = os.path.join(root, fname)
-            text = extract_text(fpath)
+            text = process_file_ocr(fpath)
             placa = extract_placa(text)
 
             if not placa or placa not in placa_to_row:
@@ -68,54 +77,69 @@ def process_expediente_excel(excel_path, docs_folder):
 
             row = placa_to_row[placa]
 
-            if re.search(DOCUMENT_PATTERNS['CERTIFICADO'][0], text, re.IGNORECASE):
+            # Certificado
+            if re.search(DOCUMENT_PATTERNS['CERTIFICADO'][0], text, re.IGNORECASE) or re.search(DOCUMENT_PATTERNS['CERTIFICADO'][1], text, re.IGNORECASE):
                 correlativo = extract_correlativo(text)
                 if correlativo:
                     ws.cell(row=row, column=8, value=correlativo) # Col H
                     ws.cell(row=row, column=27, value="A")         # Col AA (Aprobado)
                 ws.cell(row=row, column=9, value="X")             # Col I
 
-            if re.search(DOCUMENT_PATTERNS['INFORME'][0], text, re.IGNORECASE):
+            # Informe
+            if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['INFORME']):
                 ws.cell(row=row, column=10, value="X")            # Col J
 
-            if re.search(DOCUMENT_PATTERNS['TARJETA_VIRTUAL'][0], text, re.IGNORECASE):
+            # Tarjeta de Identificación
+            if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['TARJETA_VIRTUAL']):
                 ws.cell(row=row, column=12, value="X")            # Col L
-            elif re.search(DOCUMENT_PATTERNS['TARJETA_FISICA'][0], text, re.IGNORECASE):
+            elif any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['TARJETA_FISICA']):
                 ws.cell(row=row, column=11, value="X")            # Col K
 
+            # SOAT
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['SOAT']):
                 ws.cell(row=row, column=13, value="X")            # Col M
 
+            # Licencia
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['LICENCIA']):
                 ws.cell(row=row, column=14, value="X")            # Col N
 
+            # DNI
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['DNI']):
                 ws.cell(row=row, column=15, value="X")            # Col O
 
+            # Lunas
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['LUNAS']):
                 ws.cell(row=row, column=16, value="X")            # Col P
 
+            # GLP
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['CERT_GLP']):
                 ws.cell(row=row, column=17, value="X")            # Col Q
 
+            # GNV
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['CERT_GNV']):
                 ws.cell(row=row, column=18, value="X")            # Col R
 
+            # Voucher / Ticket
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['VOUCHER']):
                 ws.cell(row=row, column=19, value="X")            # Col S
 
+            # Infogas
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['INFOGAS']):
                 ws.cell(row=row, column=20, value="X")            # Col T
 
+            # TUC
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['TUC']):
                 ws.cell(row=row, column=21, value="X")            # Col U
 
+            # RTV Anterior
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['RTV_ANTERIOR']):
                 ws.cell(row=row, column=22, value="X")            # Col V
 
+            # Consulta CITV
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['CONSULTA_CITV']):
                 ws.cell(row=row, column=23, value="X")            # Col W
 
+            # GLP Inicial/Reno
             if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['GLP_INICIAL_RENO']):
                 ws.cell(row=row, column=25, value="X")            # Col Y
 
@@ -144,7 +168,7 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <h1>🚗 Sistema CITV - Verificación Automática</h1>
-        <p>Sube tu archivo de Checklist en Excel y los documentos digitalizados para auditar de forma automática.</p>
+        <p>Sube tu archivo de Checklist en Excel y los documentos digitalizados (imágenes o PDFs) para auditar de forma automática.</p>
         
         <form action="/upload" method="post" enctype="multipart/form-data">
             <div class="card">
@@ -153,9 +177,9 @@ HTML_TEMPLATE = """
             </div>
 
             <div class="card">
-                <label>2. Carpeta del Día (Contiene Subcarpetas por Placa y Archivos Sueltos):</label>
+                <label>2. Carpeta del Día (Imágenes o PDFs en Subcarpetas o Sueltos):</label>
                 <input type="file" name="doc_files" webkitdirectory directory multiple required>
-                <div class="info">Selecciona la carpeta principal. El sistema procesará todas las subcarpetas y archivos sueltos internamente.</div>
+                <div class="info">Selecciona la carpeta principal. El sistema procesará PDFs, imágenes y subcarpetas internamente.</div>
             </div>
 
             <button type="submit" class="btn">⚡ Auditar Expedientes y Descargar Excel</button>
