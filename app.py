@@ -4,13 +4,13 @@ import openpyxl
 from flask import Flask, request, render_template_string, send_file
 import pytesseract
 from PIL import Image
+from pypdf import PdfReader
 from pdf2image import convert_from_path
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Patrones mejorados y flexibles según los documentos reales de CITV
 DOCUMENT_PATTERNS = {
     'CERTIFICADO': [r'CERTIFICADO DE INSPECCI[OÓ]N T[EÉ]CNICA VEHICULAR', r'RESULTADO DE LA INSPECCI[OÓ]N'],
     'INFORME': [r'INFORME DE INSPECCI[OÓ]N T[EÉ]CNICA VEHICULAR', r'DATOS DE LOS EQUIPOS'],
@@ -24,25 +24,41 @@ DOCUMENT_PATTERNS = {
     'CERT_GNV': [r'VEH[IÍ]CULO A GNV', r'GAS NATURAL VEHICULAR', r'CERTIFICADO DE INSPECCI[OÓ]N ANUAL DEL VEH[IÍ]CULO A GNV'],
     'VOUCHER': [r'BOLETA DE VENTA', r'TICKET N°', r'TICKET DE RECAUDACION', r'PROX\. REV\. ANUAL'],
     'INFOGAS': [r'INFOGAS', r'infogas\.com\.pe', r'Habilitado para consumir'],
-    'TUC': [r'TARJETA [UÚ]NICA DE CIRCULACI[OÓ]N', r'TUC', r'AUTORIDAD DE TRANSPORTE URBANO', r'ATU'],
+    'TUC': [r me'TARJETA [UÚ]NICA DE CIRCULACI[OÓ]N', r'TUC', r'AUTORIDAD DE TRANSPORTE URBANO', r'ATU'],
     'RTV_ANTERIOR': [r'FECHA PR[OÓ]XIMA INSPECCI[OÓ]N', r'PEN[UÚ]LTIMO DOCUMENTO REGISTRADO'],
     'CONSULTA_CITV': [r'Consulta de los Certificados de Inspecci[oó]n T[eé]cnica Vehicular', r'ÚLTIMO DOCUMENTO REGISTRADO'],
     'GLP_INICIAL_RENO': [r'CERTIFICADO DE INSPECCI[OÓ]N DE VEH[IÍ]CULO A GLP']
 }
 
-def process_file_ocr(file_path):
-    """ Extrae texto de imágenes o convierte PDFs a imágenes para procesarlos """
+def extract_text_from_pdf_fast(pdf_path):
+    """ Extrae texto nativo de PDFs rápidamente sin consumir RAM """
+    text = ""
+    try:
+        reader = PdfReader(pdf_path)
+        for page in reader.pages:
+            t = page.extract_text()
+            if t:
+                text += t + "\n"
+    except Exception as e:
+        print(f"Error pypdf en {pdf_path}: {e}")
+    return text
+
+def extract_text_ocr(file_path):
+    """ Extrae texto mediante Tesseract OCR con control de memoria """
     extracted_text = ""
     try:
         if file_path.lower().endswith('.pdf'):
-            images = convert_from_path(file_path)
+            # Si pypdf no extrajo nada, es un PDF escaneado
+            images = convert_from_path(file_path, dpi=150) # DPI bajo para evitar 502
             for img in images:
                 extracted_text += pytesseract.image_to_string(img, lang='spa') + "\n"
         else:
             img = Image.open(file_path)
+            # Redimensionar si la imagen es gigante
+            img.thumbnail((1800, 1800))
             extracted_text = pytesseract.image_to_string(img, lang='spa')
     except Exception as e:
-        print(f"Error procesando {file_path}: {e}")
+        print(f"Error OCR en {file_path}: {e}")
     return extracted_text
 
 def extract_placa(text):
@@ -69,7 +85,16 @@ def process_expediente_excel(excel_path, docs_folder):
                 continue
 
             fpath = os.path.join(root, fname)
-            text = process_file_ocr(fpath)
+            
+            # Intento 1: Extracción ultrarrápida (PDF vectorial)
+            text = ""
+            if fpath.lower().endswith('.pdf'):
+                text = extract_text_from_pdf_fast(fpath)
+            
+            # Intento 2: Si no dio resultados, usar OCR
+            if not text.strip():
+                text = extract_text_ocr(fpath)
+
             placa = extract_placa(text)
 
             if not placa or placa not in placa_to_row:
@@ -78,7 +103,7 @@ def process_expediente_excel(excel_path, docs_folder):
             row = placa_to_row[placa]
 
             # Certificado
-            if re.search(DOCUMENT_PATTERNS['CERTIFICADO'][0], text, re.IGNORECASE) or re.search(DOCUMENT_PATTERNS['CERTIFICADO'][1], text, re.IGNORECASE):
+            if any(re.search(p, text, re.IGNORECASE) for p in DOCUMENT_PATTERNS['CERTIFICADO']):
                 correlativo = extract_correlativo(text)
                 if correlativo:
                     ws.cell(row=row, column=8, value=correlativo) # Col H
@@ -168,7 +193,7 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <h1>🚗 Sistema CITV - Verificación Automática</h1>
-        <p>Sube tu archivo de Checklist en Excel y los documentos digitalizados (imágenes o PDFs) para auditar de forma automática.</p>
+        <p>Sube tu archivo de Checklist en Excel y los documentos digitalizados para auditar de forma automática.</p>
         
         <form action="/upload" method="post" enctype="multipart/form-data">
             <div class="card">
@@ -177,9 +202,9 @@ HTML_TEMPLATE = """
             </div>
 
             <div class="card">
-                <label>2. Carpeta del Día (Imágenes o PDFs en Subcarpetas o Sueltos):</label>
+                <label>2. Carpeta del Día (Imágenes o PDFs):</label>
                 <input type="file" name="doc_files" webkitdirectory directory multiple required>
-                <div class="info">Selecciona la carpeta principal. El sistema procesará PDFs, imágenes y subcarpetas internamente.</div>
+                <div class="info">Selecciona la carpeta principal. El sistema procesará las imágenes y subcarpetas rápidamente.</div>
             </div>
 
             <button type="submit" class="btn">⚡ Auditar Expedientes y Descargar Excel</button>
